@@ -7,7 +7,14 @@ import html
 from urllib.parse import urlencode
 
 import requests
-from flask import Flask, request, redirect, render_template_string, session, jsonify
+from flask import (
+    Flask,
+    request,
+    redirect,
+    render_template_string,
+    session,
+    jsonify
+)
 
 
 # ============================================================
@@ -17,9 +24,10 @@ from flask import Flask, request, redirect, render_template_string, session, jso
 
 app = Flask(__name__)
 
-# ------------------------------------------------------------
+
+# ============================================================
 # CONFIGURAÇÃO
-# ------------------------------------------------------------
+# ============================================================
 
 app.secret_key = os.environ.get(
     "FLASK_SECRET_KEY",
@@ -41,12 +49,18 @@ MERCADOLIVRE_REDIRECT_URI = os.environ.get(
     "https://opportunity-hunter-v5.onrender.com/oauth/callback"
 )
 
-# Coloque "true" somente se PKCE estiver habilitado
-# na configuração do aplicativo do Mercado Livre.
 MERCADOLIVRE_USE_PKCE = (
-    os.environ.get("MERCADOLIVRE_USE_PKCE", "false").lower()
+    os.environ.get(
+        "MERCADOLIVRE_USE_PKCE",
+        "false"
+    ).lower()
     == "true"
 )
+
+
+# ============================================================
+# URLs DO MERCADO LIVRE
+# ============================================================
 
 AUTH_URL = (
     "https://auth.mercadolivre.com.br/authorization"
@@ -61,36 +75,42 @@ ME_URL = (
 )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # ARMAZENAMENTO TEMPORÁRIO DO TOKEN
-# ------------------------------------------------------------
+# ============================================================
 #
-# Esta versão mantém o token em memória.
+# Atenção:
+# O token fica apenas na memória do processo.
 #
-# Para um único teste de conexão é suficiente.
-# Para produção, devemos posteriormente colocar os tokens
-# em um banco de dados persistente.
+# Se o Render reiniciar o serviço, o token será perdido.
+# Depois podemos substituir isso por banco de dados.
 #
-# ------------------------------------------------------------
+# ============================================================
 
 TOKEN_DATA = {}
 
 
-# ------------------------------------------------------------
-# HTML
-# ------------------------------------------------------------
+# ============================================================
+# HTML BASE
+# ============================================================
 
 HTML_BASE = """
 <!DOCTYPE html>
 <html lang="pt-BR">
+
 <head>
+
     <meta charset="UTF-8">
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
 
     <title>Opportunity Hunter</title>
 
     <style>
+
         body {
             margin: 0;
             padding: 20px;
@@ -158,100 +178,142 @@ HTML_BASE = """
             padding: 15px;
             border-radius: 8px;
             overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
         }
+
+        .info {
+            color: #8ab4f8;
+        }
+
     </style>
+
 </head>
 
 <body>
+
 <div class="container">
 
 {{conteudo}}
 
 </div>
+
 </body>
+
 </html>
 """
 
 
-# ------------------------------------------------------------
-# FUNÇÕES AUXILIARES
-# ------------------------------------------------------------
+# ============================================================
+# FUNÇÃO PARA RENDERIZAR PÁGINAS
+# ============================================================
 
 def pagina(conteudo):
+
     return render_template_string(
         HTML_BASE,
         conteudo=conteudo
     )
 
 
+# ============================================================
+# VERIFICAR CONFIGURAÇÃO
+# ============================================================
+
 def configuracao_ok():
+
     return bool(
         MERCADOLIVRE_APP_ID
         and MERCADOLIVRE_CLIENT_SECRET
         and MERCADOLIVRE_REDIRECT_URI
+        and app.secret_key
     )
 
 
+# ============================================================
+# PKCE
+# ============================================================
+
 def gerar_code_verifier():
-    """
-    Gera o code_verifier para PKCE.
-    """
+
     return secrets.token_urlsafe(64)
 
 
 def gerar_code_challenge(verifier):
-    """
-    Gera code_challenge S256.
-    """
+
     digest = hashlib.sha256(
         verifier.encode("ascii")
     ).digest()
 
-    return base64.urlsafe_b64encode(
-        digest
-    ).rstrip(b"=").decode("ascii")
+    return (
+        base64.urlsafe_b64encode(digest)
+        .rstrip(b"=")
+        .decode("ascii")
+    )
 
+
+# ============================================================
+# VERIFICAR TOKEN
+# ============================================================
 
 def token_valido():
-    """
-    Verifica se existe access_token e se ainda está dentro
-    do período de validade.
-    """
 
     if not TOKEN_DATA:
         return False
 
-    access_token = TOKEN_DATA.get("access_token")
+    access_token = TOKEN_DATA.get(
+        "access_token"
+    )
 
     if not access_token:
         return False
 
-    expires_at = TOKEN_DATA.get("expires_at", 0)
+    expires_at = TOKEN_DATA.get(
+        "expires_at",
+        0
+    )
 
     return time.time() < expires_at
 
 
+# ============================================================
+# LIMPAR TOKEN
+# ============================================================
+
 def limpar_token():
+
     TOKEN_DATA.clear()
 
 
-def refresh_access_token():
-    """
-    Atualiza o access token usando refresh_token.
-    """
+# ============================================================
+# REFRESH TOKEN
+# ============================================================
 
-    refresh_token = TOKEN_DATA.get("refresh_token")
+def refresh_access_token():
+
+    refresh_token = TOKEN_DATA.get(
+        "refresh_token"
+    )
 
     if not refresh_token:
+
         return False, {
-            "erro": "Não existe refresh_token armazenado."
+            "erro":
+                "Não existe refresh_token armazenado."
         }
 
     dados = {
-        "grant_type": "refresh_token",
-        "client_id": MERCADOLIVRE_APP_ID,
-        "client_secret": MERCADOLIVRE_CLIENT_SECRET,
-        "refresh_token": refresh_token
+        "grant_type":
+            "refresh_token",
+
+        "client_id":
+            MERCADOLIVRE_APP_ID,
+
+        "client_secret":
+            MERCADOLIVRE_CLIENT_SECRET,
+
+        "refresh_token":
+            refresh_token
     }
 
     try:
@@ -260,7 +322,9 @@ def refresh_access_token():
             TOKEN_URL,
             data=dados,
             headers={
-                "accept": "application/json",
+                "accept":
+                    "application/json",
+
                 "content-type":
                     "application/x-www-form-urlencoded"
             },
@@ -270,58 +334,87 @@ def refresh_access_token():
     except requests.RequestException as erro:
 
         return False, {
-            "erro": "Falha de comunicação com Mercado Livre.",
-            "detalhe": str(erro)
+            "erro":
+                "Falha de comunicação com Mercado Livre.",
+
+            "detalhe":
+                str(erro)
         }
 
     try:
+
         dados_resposta = resposta.json()
+
     except Exception:
+
         dados_resposta = {
-            "resposta": resposta.text
+            "resposta":
+                resposta.text
         }
 
     if resposta.status_code != 200:
 
         return False, {
-            "erro": "Mercado Livre recusou o refresh.",
-            "status": resposta.status_code,
-            "resposta": dados_resposta
+            "erro":
+                "Mercado Livre recusou o refresh.",
+
+            "status":
+                resposta.status_code,
+
+            "resposta":
+                dados_resposta
         }
 
-    # Atualiza os dados.
     TOKEN_DATA.clear()
 
     TOKEN_DATA.update({
+
         "access_token":
-            dados_resposta.get("access_token"),
+            dados_resposta.get(
+                "access_token"
+            ),
 
         "refresh_token":
-            dados_resposta.get("refresh_token"),
+            dados_resposta.get(
+                "refresh_token"
+            ),
 
         "token_type":
-            dados_resposta.get("token_type"),
+            dados_resposta.get(
+                "token_type"
+            ),
 
         "expires_in":
-            dados_resposta.get("expires_in"),
+            dados_resposta.get(
+                "expires_in"
+            ),
 
         "scope":
-            dados_resposta.get("scope"),
+            dados_resposta.get(
+                "scope"
+            ),
 
         "user_id":
-            dados_resposta.get("user_id"),
+            dados_resposta.get(
+                "user_id"
+            ),
 
         "expires_at":
             time.time()
-            + int(dados_resposta.get("expires_in", 0))
+            + int(
+                dados_resposta.get(
+                    "expires_in",
+                    0
+                )
+            )
     })
 
     return True, TOKEN_DATA
 
 
-# ------------------------------------------------------------
+# ============================================================
 # PÁGINA PRINCIPAL
-# ------------------------------------------------------------
+# ============================================================
 
 @app.get("/")
 def inicio():
@@ -331,7 +424,9 @@ def inicio():
     if not configurado:
 
         conteudo = """
+
         <div class="card">
+
             <h1>Opportunity Hunter</h1>
 
             <p class="error">
@@ -344,7 +439,7 @@ def inicio():
             </p>
 
             <p>
-                Necessárias:
+                Variáveis necessárias:
             </p>
 
             <ul>
@@ -353,20 +448,33 @@ def inicio():
                 <li>MERCADOLIVRE_REDIRECT_URI</li>
                 <li>FLASK_SECRET_KEY</li>
             </ul>
+
         </div>
+
         """
 
         return pagina(conteudo)
 
-    conectado = bool(TOKEN_DATA.get("access_token"))
-
-    status = (
-        '<span class="ok">Conectado</span>'
-        if conectado
-        else '<span class="warn">Não conectado</span>'
+    conectado = bool(
+        TOKEN_DATA.get(
+            "access_token"
+        )
     )
 
+    if conectado:
+
+        status = (
+            '<span class="ok">Conectado</span>'
+        )
+
+    else:
+
+        status = (
+            '<span class="warn">Não conectado</span>'
+        )
+
     conteudo = f"""
+
     <div class="card">
 
         <h1>Opportunity Hunter</h1>
@@ -378,52 +486,91 @@ def inicio():
             {status}
         </p>
 
-        <a class="button"
-           href="/oauth/mercadolivre">
+        <a
+            class="button"
+            href="/oauth/mercadolivre"
+        >
             Conectar Mercado Livre
         </a>
 
         <br>
 
-        <a class="button"
-           href="/oauth/status">
+        <a
+            class="button"
+            href="/oauth/status"
+        >
             Ver status
         </a>
 
         <br>
 
-        <a class="button"
-           href="/api/me">
+        <a
+            class="button"
+            href="/api/me"
+        >
             Testar minha conta
         </a>
 
+        <br>
+
+        <a
+            class="button"
+            href="/oauth/refresh"
+        >
+            Atualizar token
+        </a>
+
+        <br>
+
+        <a
+            class="button"
+            href="/webhooks/mercadolivre"
+        >
+            Status do Webhook
+        </a>
+
     </div>
+
     """
 
     return pagina(conteudo)
 
 
-# ------------------------------------------------------------
+# ============================================================
 # SAÚDE
-# ------------------------------------------------------------
+# ============================================================
 
 @app.get("/saúde")
 @app.get("/saude")
 def saude():
 
     return {
-        "OK": True,
-        "serviço": "Portal do Caçador de Oportunidades",
-        "tempo": int(time.time()),
-        "oauth_configurado": configuracao_ok(),
+
+        "OK":
+            True,
+
+        "serviço":
+            "Portal do Caçador de Oportunidades",
+
+        "tempo":
+            int(time.time()),
+
+        "oauth_configurado":
+            configuracao_ok(),
+
         "mercado_livre_conectado":
-            bool(TOKEN_DATA.get("access_token"))
+            bool(
+                TOKEN_DATA.get(
+                    "access_token"
+                )
+            )
+
     }, 200
 
 
-# ------------------------------------------------------------
+# ============================================================
 # INICIAR OAUTH
-# ------------------------------------------------------------
+# ============================================================
 
 @app.get("/oauth/mercadolivre")
 def oauth_mercadolivre():
@@ -431,6 +578,7 @@ def oauth_mercadolivre():
     if not configuracao_ok():
 
         return pagina("""
+
         <div class="card">
 
             <h2>Configuração incompleta</h2>
@@ -441,6 +589,7 @@ def oauth_mercadolivre():
             </p>
 
         </div>
+
         """), 500
 
     # --------------------------------------------------------
@@ -452,10 +601,18 @@ def oauth_mercadolivre():
     session["oauth_state"] = state
 
     parametros = {
-        "response_type": "code",
-        "client_id": MERCADOLIVRE_APP_ID,
-        "redirect_uri": MERCADOLIVRE_REDIRECT_URI,
-        "state": state
+
+        "response_type":
+            "code",
+
+        "client_id":
+            MERCADOLIVRE_APP_ID,
+
+        "redirect_uri":
+            MERCADOLIVRE_REDIRECT_URI,
+
+        "state":
+            state
     }
 
     # --------------------------------------------------------
@@ -472,12 +629,20 @@ def oauth_mercadolivre():
 
         session["code_verifier"] = verifier
 
-        parametros["code_challenge"] = challenge
-        parametros["code_challenge_method"] = "S256"
+        parametros["code_challenge"] = (
+            challenge
+        )
+
+        parametros["code_challenge_method"] = (
+            "S256"
+        )
 
     else:
 
-        session.pop("code_verifier", None)
+        session.pop(
+            "code_verifier",
+            None
+        )
 
     url = (
         AUTH_URL
@@ -488,15 +653,15 @@ def oauth_mercadolivre():
     return redirect(url)
 
 
-# ------------------------------------------------------------
+# ============================================================
 # CALLBACK OAUTH
-# ------------------------------------------------------------
+# ============================================================
 
 @app.get("/oauth/callback")
 def oauth_callback():
 
     # --------------------------------------------------------
-    # ERRO DEVOLVIDO PELO MERCADO LIVRE
+    # ERRO
     # --------------------------------------------------------
 
     erro = request.args.get(
@@ -514,6 +679,7 @@ def oauth_callback():
         )
 
         return pagina(f"""
+
         <div class="card">
 
             <h2>Autorização não concluída</h2>
@@ -522,11 +688,15 @@ def oauth_callback():
                 {detalhe}
             </p>
 
-            <a class="button" href="/">
+            <a
+                class="button"
+                href="/"
+            >
                 Voltar
             </a>
 
         </div>
+
         """), 400
 
     # --------------------------------------------------------
@@ -541,6 +711,7 @@ def oauth_callback():
     if not codigo:
 
         return pagina("""
+
         <div class="card">
 
             <h2>Retorno inválido</h2>
@@ -550,7 +721,15 @@ def oauth_callback():
                 de autorização.
             </p>
 
+            <a
+                class="button"
+                href="/"
+            >
+                Voltar
+            </a>
+
         </div>
+
         """), 400
 
     # --------------------------------------------------------
@@ -570,6 +749,7 @@ def oauth_callback():
     if not estado_salvo:
 
         return pagina("""
+
         <div class="card">
 
             <h2>Estado OAuth ausente</h2>
@@ -582,7 +762,15 @@ def oauth_callback():
                 Tente iniciar a conexão novamente.
             </p>
 
+            <a
+                class="button"
+                href="/"
+            >
+                Voltar
+            </a>
+
         </div>
+
         """), 400
 
     if not secrets.compare_digest(
@@ -591,6 +779,7 @@ def oauth_callback():
     ):
 
         return pagina("""
+
         <div class="card">
 
             <h2>Falha de segurança</h2>
@@ -601,19 +790,20 @@ def oauth_callback():
             </p>
 
         </div>
+
         """), 400
 
-    # Remove o state depois de validado.
     session.pop(
         "oauth_state",
         None
     )
 
     # --------------------------------------------------------
-    # TROCAR CODE POR ACCESS TOKEN
+    # TROCAR CODE POR TOKEN
     # --------------------------------------------------------
 
     dados = {
+
         "grant_type":
             "authorization_code",
 
@@ -630,7 +820,10 @@ def oauth_callback():
             MERCADOLIVRE_REDIRECT_URI
     }
 
+    # --------------------------------------------------------
     # PKCE
+    # --------------------------------------------------------
+
     if MERCADOLIVRE_USE_PKCE:
 
         verifier = session.pop(
@@ -641,6 +834,7 @@ def oauth_callback():
         if not verifier:
 
             return pagina("""
+
             <div class="card">
 
                 <h2>PKCE incompleto</h2>
@@ -650,12 +844,13 @@ def oauth_callback():
                 </p>
 
             </div>
+
             """), 400
 
         dados["code_verifier"] = verifier
 
     # --------------------------------------------------------
-    # REQUEST PARA MERCADO LIVRE
+    # REQUEST TOKEN
     # --------------------------------------------------------
 
     try:
@@ -664,7 +859,9 @@ def oauth_callback():
             TOKEN_URL,
             data=dados,
             headers={
-                "accept": "application/json",
+                "accept":
+                    "application/json",
+
                 "content-type":
                     "application/x-www-form-urlencoded"
             },
@@ -674,6 +871,7 @@ def oauth_callback():
     except requests.RequestException as erro:
 
         return pagina(f"""
+
         <div class="card">
 
             <h2>Erro de comunicação</h2>
@@ -683,9 +881,12 @@ def oauth_callback():
                 Mercado Livre.
             </p>
 
-            <pre>{html.escape(str(erro))}</pre>
+            <pre>
+{html.escape(str(erro))}
+            </pre>
 
         </div>
+
         """), 502
 
     # --------------------------------------------------------
@@ -699,16 +900,20 @@ def oauth_callback():
     except Exception:
 
         dados_token = {
-            "resposta": resposta.text
+
+            "resposta":
+                resposta.text
         }
 
     if resposta.status_code != 200:
 
-        # Nunca mostramos Secret Key.
         return pagina(f"""
+
         <div class="card">
 
-            <h2>Mercado Livre recusou a autorização</h2>
+            <h2>
+                Mercado Livre recusou a autorização
+            </h2>
 
             <p class="error">
                 Não foi possível trocar o código
@@ -720,19 +925,23 @@ def oauth_callback():
                 {resposta.status_code}
             </p>
 
-            <pre>{html.escape(
-                str(dados_token)
-            )}</pre>
+            <pre>
+{html.escape(str(dados_token))}
+            </pre>
 
-            <a class="button" href="/">
+            <a
+                class="button"
+                href="/"
+            >
                 Voltar
             </a>
 
         </div>
+
         """), 400
 
     # --------------------------------------------------------
-    # SALVAR TOKEN EM MEMÓRIA
+    # SALVAR TOKEN
     # --------------------------------------------------------
 
     TOKEN_DATA.clear()
@@ -740,22 +949,34 @@ def oauth_callback():
     TOKEN_DATA.update({
 
         "access_token":
-            dados_token.get("access_token"),
+            dados_token.get(
+                "access_token"
+            ),
 
         "refresh_token":
-            dados_token.get("refresh_token"),
+            dados_token.get(
+                "refresh_token"
+            ),
 
         "token_type":
-            dados_token.get("token_type"),
+            dados_token.get(
+                "token_type"
+            ),
 
         "expires_in":
-            dados_token.get("expires_in"),
+            dados_token.get(
+                "expires_in"
+            ),
 
         "scope":
-            dados_token.get("scope"),
+            dados_token.get(
+                "scope"
+            ),
 
         "user_id":
-            dados_token.get("user_id"),
+            dados_token.get(
+                "user_id"
+            ),
 
         "expires_at":
             time.time()
@@ -772,6 +993,7 @@ def oauth_callback():
     # --------------------------------------------------------
 
     return pagina(f"""
+
     <div class="card">
 
         <h2 class="ok">
@@ -806,34 +1028,42 @@ def oauth_callback():
             )}
         </p>
 
-        <a class="button"
-           href="/api/me">
+        <a
+            class="button"
+            href="/api/me"
+        >
             Testar conexão
         </a>
 
         <br>
 
-        <a class="button"
-           href="/">
+        <a
+            class="button"
+            href="/"
+        >
             Voltar
         </a>
 
     </div>
+
     """)
 
 
-# ------------------------------------------------------------
+# ============================================================
 # STATUS DO OAUTH
-# ------------------------------------------------------------
+# ============================================================
 
 @app.get("/oauth/status")
 def oauth_status():
 
     conectado = bool(
-        TOKEN_DATA.get("access_token")
+        TOKEN_DATA.get(
+            "access_token"
+        )
     )
 
     resposta = {
+
         "oauth_configurado":
             configuracao_ok(),
 
@@ -841,28 +1071,33 @@ def oauth_status():
             conectado,
 
         "user_id":
-            TOKEN_DATA.get("user_id"),
+            TOKEN_DATA.get(
+                "user_id"
+            ),
 
         "scope":
-            TOKEN_DATA.get("scope"),
+            TOKEN_DATA.get(
+                "scope"
+            ),
 
         "expires_in":
-            TOKEN_DATA.get("expires_in")
+            TOKEN_DATA.get(
+                "expires_in"
+            )
     }
 
     return jsonify(resposta)
 
 
-# ------------------------------------------------------------
+# ============================================================
 # TESTAR CONTA DO MERCADO LIVRE
-# ------------------------------------------------------------
+# ============================================================
 
 @app.get("/api/me")
 def api_me():
 
     if not token_valido():
 
-        # Tenta renovar automaticamente.
         sucesso, resultado = (
             refresh_access_token()
         )
@@ -870,16 +1105,33 @@ def api_me():
         if not sucesso:
 
             return jsonify({
-                "OK": False,
+
+                "OK":
+                    False,
+
                 "erro":
                     "Mercado Livre não conectado.",
+
                 "detalhes":
                     resultado
+
             }), 401
 
     access_token = TOKEN_DATA.get(
         "access_token"
     )
+
+    if not access_token:
+
+        return jsonify({
+
+            "OK":
+                False,
+
+            "erro":
+                "Access token não disponível."
+
+        }), 401
 
     try:
 
@@ -895,11 +1147,16 @@ def api_me():
     except requests.RequestException as erro:
 
         return jsonify({
-            "OK": False,
+
+            "OK":
+                False,
+
             "erro":
                 "Falha ao consultar Mercado Livre.",
+
             "detalhe":
                 str(erro)
+
         }), 502
 
     try:
@@ -909,29 +1166,40 @@ def api_me():
     except Exception:
 
         dados = {
-            "resposta": resposta.text
+
+            "resposta":
+                resposta.text
         }
 
     if resposta.status_code != 200:
 
         return jsonify({
-            "OK": False,
+
+            "OK":
+                False,
+
             "status":
                 resposta.status_code,
+
             "resposta":
                 dados
+
         }), resposta.status_code
 
     return jsonify({
-        "OK": True,
+
+        "OK":
+            True,
+
         "mercado_livre":
             dados
+
     })
 
 
-# ------------------------------------------------------------
+# ============================================================
 # REFRESH MANUAL
-# ------------------------------------------------------------
+# ============================================================
 
 @app.get("/oauth/refresh")
 def oauth_refresh():
@@ -943,55 +1211,224 @@ def oauth_refresh():
     if not sucesso:
 
         return jsonify({
-            "OK": False,
+
+            "OK":
+                False,
+
             "resultado":
                 resultado
+
         }), 400
 
     return jsonify({
-        "OK": True,
+
+        "OK":
+            True,
+
         "mensagem":
             "Token atualizado.",
+
         "user_id":
-            resultado.get("user_id"),
+            resultado.get(
+                "user_id"
+            ),
+
         "scope":
-            resultado.get("scope"),
-         </p>
+            resultado.get(
+                "scope"
+            ),
 
-      <p>
-        <strong>State:</strong>
-        <code>{safe_state}</code>
-      </p>
+        "expires_in":
+            resultado.get(
+                "expires_in"
+            )
 
-      <p class="warn">
-        O código de autorização não é exibido por segurança.
-      </p>
+    })
+
+
+# ============================================================
+# DESCONECTAR
+# ============================================================
+
+@app.get("/oauth/logout")
+def oauth_logout():
+
+    limpar_token()
+
+    session.pop(
+        "oauth_state",
+        None
+    )
+
+    session.pop(
+        "code_verifier",
+        None
+    )
+
+    return pagina("""
+
+    <div class="card">
+
+        <h2>Mercado Livre desconectado</h2>
+
+        <p class="ok">
+            O token armazenado em memória foi removido.
+        </p>
+
+        <a
+            class="button"
+            href="/"
+        >
+            Voltar
+        </a>
+
     </div>
-    """), 200
+
+    """)
 
 
-@app.post("/webhooks/mercadolivre")
-def mercadolivre_webhook():
+# ============================================================
+# WEBHOOK MERCADO LIVRE
+# ============================================================
 
-    # O Mercado Livre exige resposta HTTP 200 rapidamente.
-    payload = request.get_json(silent=True) or {}
+@app.route(
+    "/webhooks/mercadolivre",
+    methods=["GET", "POST"]
+)
+def webhook_mercadolivre():
+
+    if request.method == "GET":
+
+        return jsonify({
+
+            "OK":
+                True,
+
+            "webhook":
+                "Mercado Livre",
+
+            "status":
+                "ativo",
+
+            "metodo":
+                "GET"
+
+        }), 200
+
+    # --------------------------------------------------------
+    # RECEBER NOTIFICAÇÃO
+    # --------------------------------------------------------
+
+    try:
+
+        dados = request.get_json(
+            silent=True
+        )
+
+    except Exception:
+
+        dados = None
+
+    if dados is None:
+
+        dados = {}
+
+    # --------------------------------------------------------
+    # LOG BÁSICO
+    # --------------------------------------------------------
+    #
+    # Não gravamos tokens ou secrets.
+    #
+    # --------------------------------------------------------
 
     print(
-        "Mercado Livre notification:",
-        json.dumps(payload, ensure_ascii=False)
+        "Webhook Mercado Livre recebido:",
+        dados
     )
 
-    return Response(
-        "OK",
-        status=200,
-        mimetype="text/plain"
-    )
+    return jsonify({
 
+        "OK":
+            True,
+
+        "recebido":
+            True
+
+    }), 200
+
+
+# ============================================================
+# ROTA 404
+# ============================================================
+
+@app.errorhandler(404)
+def pagina_nao_encontrada(erro):
+
+    return pagina("""
+
+    <div class="card">
+
+        <h2>Página não encontrada</h2>
+
+        <p class="error">
+            A rota solicitada não existe.
+        </p>
+
+        <a
+            class="button"
+            href="/"
+        >
+            Voltar para o início
+        </a>
+
+    </div>
+
+    """), 404
+
+
+# ============================================================
+# ROTA 500
+# ============================================================
+
+@app.errorhandler(500)
+def erro_interno(erro):
+
+    return pagina("""
+
+    <div class="card">
+
+        <h2>Erro interno</h2>
+
+        <p class="error">
+            Ocorreu um erro interno no Opportunity Hunter.
+        </p>
+
+        <a
+            class="button"
+            href="/"
+        >
+            Voltar
+        </a>
+
+    </div>
+
+    """), 500
+
+
+# ============================================================
+# EXECUÇÃO LOCAL
+# ============================================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
+
+    porta = int(
+        os.environ.get(
+            "PORT",
+            "10000"
+        )
+    )
 
     app.run(
         host="0.0.0.0",
-        port=port
+        port=porta
     )
