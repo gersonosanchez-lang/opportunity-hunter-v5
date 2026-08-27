@@ -178,7 +178,7 @@ HTML_BASE = """
 
 <div class="container">
 
-{{conteudo}}
+{{conteudo|safe}}
 
 </div>
 
