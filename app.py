@@ -4,6 +4,7 @@ import secrets
 import hashlib
 import base64
 import html
+import sqlite3
 from urllib.parse import urlencode
 
 import requests
@@ -72,14 +73,71 @@ ME_URL = (
 
 
 # ============================================================
-# ARMAZENAMENTO TEMPORÁRIO
+# BANCO DE DADOS
 # ============================================================
 
-TOKEN_DATA = {}
+# Por enquanto usamos SQLite.
+#
+# IMPORTANTE:
+# No Render gratuito, o arquivo pode ser perdido em um novo
+# deploy/restart. Depois podemos configurar armazenamento
+# persistente ou PostgreSQL.
+#
+# O objetivo desta etapa é tirar o token da memória e deixar
+# a arquitetura pronta para persistência.
+# ============================================================
+
+DATABASE_PATH = os.environ.get(
+    "OPPORTUNITY_HUNTER_DB",
+    "opportunity_hunter.db"
+)
+
+
+def conectar_banco():
+
+    conexao = sqlite3.connect(
+        DATABASE_PATH,
+        timeout=30
+    )
+
+    conexao.row_factory = sqlite3.Row
+
+    return conexao
+
+
+def inicializar_banco():
+
+    conexao = conectar_banco()
+
+    try:
+
+        conexao.execute("""
+            CREATE TABLE IF NOT EXISTS mercado_livre_token (
+                id INTEGER PRIMARY KEY,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT NOT NULL,
+                token_type TEXT,
+                expires_in INTEGER,
+                scope TEXT,
+                user_id TEXT,
+                expires_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+
+        conexao.commit()
+
+    finally:
+
+        conexao.close()
+
+
+# Inicializa o banco quando o aplicativo sobe.
+inicializar_banco()
 
 
 # ============================================================
-# HTML BASE
+# HTML
 # ============================================================
 
 HTML_BASE = """
@@ -189,7 +247,7 @@ HTML_BASE = """
 
 
 # ============================================================
-# FUNÇÃO PARA RENDERIZAR PÁGINAS
+# PÁGINA
 # ============================================================
 
 def pagina(conteudo):
@@ -201,7 +259,7 @@ def pagina(conteudo):
 
 
 # ============================================================
-# VERIFICAR CONFIGURAÇÃO
+# CONFIGURAÇÃO
 # ============================================================
 
 def configuracao_ok():
@@ -236,32 +294,163 @@ def gerar_code_challenge(verifier):
 
 
 # ============================================================
-# TOKEN
+# TOKEN - BANCO
 # ============================================================
+
+def salvar_token(dados):
+
+    access_token = dados.get(
+        "access_token"
+    )
+
+    refresh_token = dados.get(
+        "refresh_token"
+    )
+
+    if not access_token or not refresh_token:
+
+        raise ValueError(
+            "Mercado Livre não retornou os tokens necessários."
+        )
+
+    expires_in = int(
+        dados.get(
+            "expires_in",
+            0
+        )
+    )
+
+    expires_at = (
+        time.time()
+        + expires_in
+    )
+
+    agora = time.time()
+
+    conexao = conectar_banco()
+
+    try:
+
+        conexao.execute(
+            "DELETE FROM mercado_livre_token"
+        )
+
+        conexao.execute("""
+            INSERT INTO mercado_livre_token (
+                id,
+                access_token,
+                refresh_token,
+                token_type,
+                expires_in,
+                scope,
+                user_id,
+                expires_at,
+                updated_at
+            )
+            VALUES (
+                1,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?
+            )
+        """, (
+            access_token,
+            refresh_token,
+            dados.get("token_type"),
+            expires_in,
+            dados.get("scope"),
+            dados.get("user_id"),
+            expires_at,
+            agora
+        ))
+
+        conexao.commit()
+
+    finally:
+
+        conexao.close()
+
+
+def obter_token():
+
+    conexao = conectar_banco()
+
+    try:
+
+        resultado = conexao.execute("""
+            SELECT
+                access_token,
+                refresh_token,
+                token_type,
+                expires_in,
+                scope,
+                user_id,
+                expires_at,
+                updated_at
+            FROM mercado_livre_token
+            WHERE id = 1
+        """).fetchone()
+
+        if not resultado:
+
+            return None
+
+        return dict(resultado)
+
+    finally:
+
+        conexao.close()
+
+
+def apagar_token():
+
+    conexao = conectar_banco()
+
+    try:
+
+        conexao.execute(
+            "DELETE FROM mercado_livre_token"
+        )
+
+        conexao.commit()
+
+    finally:
+
+        conexao.close()
+
 
 def token_valido():
 
-    if not TOKEN_DATA:
+    token = obter_token()
+
+    if not token:
+
         return False
 
-    access_token = TOKEN_DATA.get(
+    access_token = token.get(
         "access_token"
     )
 
     if not access_token:
+
         return False
 
-    expires_at = TOKEN_DATA.get(
-        "expires_at",
-        0
+    expires_at = float(
+        token.get(
+            "expires_at",
+            0
+        )
     )
 
-    return time.time() < expires_at
-
-
-def limpar_token():
-
-    TOKEN_DATA.clear()
+    # Margem de segurança de 60 segundos.
+    return time.time() < (
+        expires_at - 60
+    )
 
 
 # ============================================================
@@ -270,7 +459,16 @@ def limpar_token():
 
 def refresh_access_token():
 
-    refresh_token = TOKEN_DATA.get(
+    token = obter_token()
+
+    if not token:
+
+        return False, {
+            "erro":
+                "Nenhum token armazenado."
+        }
+
+    refresh_token = token.get(
         "refresh_token"
     )
 
@@ -278,7 +476,7 @@ def refresh_access_token():
 
         return False, {
             "erro":
-                "Não existe refresh_token armazenado."
+                "Refresh token não encontrado."
         }
 
     dados = {
@@ -314,6 +512,7 @@ def refresh_access_token():
     except requests.RequestException as erro:
 
         return False, {
+
             "erro":
                 "Falha de comunicação com Mercado Livre.",
 
@@ -359,16 +558,14 @@ def refresh_access_token():
         or refresh_token
     )
 
-    expires_in = int(
-        dados_resposta.get(
-            "expires_in",
-            0
-        )
-    )
+    if not novo_access_token:
 
-    TOKEN_DATA.clear()
+        return False, {
+            "erro":
+                "Mercado Livre não retornou novo access_token."
+        }
 
-    TOKEN_DATA.update({
+    dados_salvar = {
 
         "access_token":
             novo_access_token,
@@ -378,28 +575,79 @@ def refresh_access_token():
 
         "token_type":
             dados_resposta.get(
-                "token_type"
+                "token_type",
+                token.get("token_type")
             ),
 
         "expires_in":
-            expires_in,
+            dados_resposta.get(
+                "expires_in",
+                0
+            ),
 
         "scope":
             dados_resposta.get(
-                "scope"
+                "scope",
+                token.get("scope")
             ),
 
         "user_id":
             dados_resposta.get(
-                "user_id"
-            ),
+                "user_id",
+                token.get("user_id")
+            )
+    }
 
-        "expires_at":
-            time.time()
-            + expires_in
-    })
+    salvar_token(
+        dados_salvar
+    )
 
-    return True, TOKEN_DATA
+    return True, {
+        "user_id":
+            dados_salvar.get("user_id"),
+
+        "scope":
+            dados_salvar.get("scope"),
+
+        "expires_in":
+            dados_salvar.get("expires_in")
+    }
+
+
+# ============================================================
+# GARANTIR TOKEN
+# ============================================================
+
+def obter_access_token():
+
+    token = obter_token()
+
+    if token and token_valido():
+
+        return True, token.get(
+            "access_token"
+        )
+
+    if token:
+
+        sucesso, resultado = (
+            refresh_access_token()
+        )
+
+        if sucesso:
+
+            novo_token = obter_token()
+
+            return True, novo_token.get(
+                "access_token"
+            )
+
+        return False, resultado
+
+    return False, {
+        "erro":
+            "Mercado Livre não está conectado."
+    }
 
 
 # ============================================================
@@ -411,7 +659,7 @@ def inicio():
 
     if not configuracao_ok():
 
-        conteudo = """
+        return pagina("""
         <div class="card">
 
             <h1>Opportunity Hunter</h1>
@@ -433,14 +681,13 @@ def inicio():
             </ul>
 
         </div>
-        """
+        """)
 
-        return pagina(conteudo)
+    token = obter_token()
 
     conectado = bool(
-        TOKEN_DATA.get(
-            "access_token"
-        )
+        token
+        and token.get("access_token")
     )
 
     if conectado:
@@ -451,6 +698,22 @@ def inicio():
             '</span>'
         )
 
+        user_id = html.escape(
+            str(
+                token.get(
+                    "user_id",
+                    ""
+                )
+            )
+        )
+
+        informacao = f"""
+        <p>
+            <strong>User ID:</strong>
+            {user_id}
+        </p>
+        """
+
     else:
 
         status = (
@@ -458,6 +721,8 @@ def inicio():
             'Não conectado'
             '</span>'
         )
+
+        informacao = ""
 
     conteudo = f"""
     <div class="card">
@@ -469,6 +734,8 @@ def inicio():
         <p>
             Status: {status}
         </p>
+
+        {informacao}
 
         <a
             class="button"
@@ -495,6 +762,15 @@ def inicio():
             Testar minha conta
         </a>
 
+        <br>
+
+        <a
+            class="button"
+            href="/health"
+        >
+            Ver saúde do Gateway
+        </a>
+
     </div>
     """
 
@@ -502,20 +778,22 @@ def inicio():
 
 
 # ============================================================
-# SAÚDE
+# HEALTH
 # ============================================================
 
-@app.get("/saúde")
+@app.get("/health")
 @app.get("/saude")
-def saude():
+def health():
+
+    token = obter_token()
 
     return {
 
         "OK":
             True,
 
-        "serviço":
-            "Portal do Caçador de Oportunidades",
+        "servico":
+            "Opportunity Hunter Gateway",
 
         "tempo":
             int(time.time()),
@@ -525,10 +803,12 @@ def saude():
 
         "mercado_livre_conectado":
             bool(
-                TOKEN_DATA.get(
-                    "access_token"
-                )
-            )
+                token
+                and token.get("access_token")
+            ),
+
+        "token_valido":
+            token_valido()
 
     }, 200
 
@@ -576,15 +856,23 @@ def oauth_mercadolivre():
 
     if MERCADOLIVRE_USE_PKCE:
 
-        verifier = gerar_code_verifier()
+        verifier = (
+            gerar_code_verifier()
+        )
 
-        challenge = gerar_code_challenge(
+        challenge = (
+            gerar_code_challenge(
+                verifier
+            )
+        )
+
+        session["code_verifier"] = (
             verifier
         )
 
-        session["code_verifier"] = verifier
-
-        parametros["code_challenge"] = challenge
+        parametros[
+            "code_challenge"
+        ] = challenge
 
         parametros[
             "code_challenge_method"
@@ -754,10 +1042,16 @@ def oauth_callback():
                     O code_verifier não foi encontrado.
                 </p>
 
+                <p>
+                    Tente iniciar a conexão novamente.
+                </p>
+
             </div>
             """), 400
 
-        dados["code_verifier"] = verifier
+        dados[
+            "code_verifier"
+        ] = verifier
 
     try:
 
@@ -800,7 +1094,9 @@ def oauth_callback():
 
     try:
 
-        dados_token = resposta.json()
+        dados_token = (
+            resposta.json()
+        )
 
     except Exception:
 
@@ -811,6 +1107,34 @@ def oauth_callback():
 
     if resposta.status_code != 200:
 
+        # Não mostramos client_secret,
+        # access_token ou refresh_token.
+        erro_publico = {}
+
+        if isinstance(
+            dados_token,
+            dict
+        ):
+
+            for chave in (
+                "error",
+                "error_description",
+                "message"
+            ):
+
+                if chave in dados_token:
+
+                    erro_publico[
+                        chave
+                    ] = dados_token[chave]
+
+        if not erro_publico:
+
+            erro_publico = {
+                "erro":
+                    "Mercado Livre recusou a autorização."
+            }
+
         return pagina(f"""
         <div class="card">
 
@@ -820,8 +1144,8 @@ def oauth_callback():
             </h2>
 
             <p class="error">
-                Não foi possível trocar o código
-                pelo access token.
+                Não foi possível concluir
+                a conexão.
             </p>
 
             <p>
@@ -830,7 +1154,7 @@ def oauth_callback():
             </p>
 
             <pre>{html.escape(
-                str(dados_token)
+                str(erro_publico)
             )}</pre>
 
             <a
@@ -843,49 +1167,31 @@ def oauth_callback():
         </div>
         """), 400
 
-    expires_in = int(
-        dados_token.get(
-            "expires_in",
-            0
+    try:
+
+        salvar_token(
+            dados_token
         )
-    )
 
-    TOKEN_DATA.clear()
+    except Exception as erro:
 
-    TOKEN_DATA.update({
+        return pagina(f"""
+        <div class="card">
 
-        "access_token":
-            dados_token.get(
-                "access_token"
-            ),
+            <h2>Erro ao salvar conexão</h2>
 
-        "refresh_token":
-            dados_token.get(
-                "refresh_token"
-            ),
+            <p class="error">
+                A autorização foi recebida,
+                mas o Gateway não conseguiu
+                salvar os dados.
+            </p>
 
-        "token_type":
-            dados_token.get(
-                "token_type"
-            ),
+            <pre>{html.escape(
+                str(erro)
+            )}</pre>
 
-        "expires_in":
-            expires_in,
-
-        "scope":
-            dados_token.get(
-                "scope"
-            ),
-
-        "user_id":
-            dados_token.get(
-                "user_id"
-            ),
-
-        "expires_at":
-            time.time()
-            + expires_in
-    })
+        </div>
+        """), 500
 
     user_id = html.escape(
         str(
@@ -927,6 +1233,10 @@ def oauth_callback():
             {scope}
         </p>
 
+        <p class="ok">
+            O token foi armazenado pelo Gateway.
+        </p>
+
         <a
             class="button"
             href="/api/me"
@@ -954,13 +1264,14 @@ def oauth_callback():
 @app.get("/oauth/status")
 def oauth_status():
 
+    token = obter_token()
+
     conectado = bool(
-        TOKEN_DATA.get(
-            "access_token"
-        )
+        token
+        and token.get("access_token")
     )
 
-    return jsonify({
+    resposta = {
 
         "oauth_configurado":
             configuracao_ok(),
@@ -968,58 +1279,57 @@ def oauth_status():
         "conectado":
             conectado,
 
+        "token_valido":
+            token_valido(),
+
         "user_id":
-            TOKEN_DATA.get(
-                "user_id"
-            ),
+            token.get("user_id")
+            if token else None,
 
         "scope":
-            TOKEN_DATA.get(
-                "scope"
-            ),
+            token.get("scope")
+            if token else None,
 
         "expires_in":
-            TOKEN_DATA.get(
-                "expires_in"
-            ),
+            token.get("expires_in")
+            if token else None,
 
-        "token_valido":
-            token_valido()
+        "armazenamento":
+            "SQLite"
+    }
 
-    })
+    return jsonify(
+        resposta
+    )
 
 
 # ============================================================
-# TESTAR CONTA MERCADO LIVRE
+# TESTAR CONTA
 # ============================================================
 
 @app.get("/api/me")
 def api_me():
 
-    if not token_valido():
-
-        sucesso, resultado = (
-            refresh_access_token()
-        )
-
-        if not sucesso:
-
-            return jsonify({
-
-                "OK":
-                    False,
-
-                "erro":
-                    "Mercado Livre não conectado.",
-
-                "detalhes":
-                    resultado
-
-            }), 401
-
-    access_token = TOKEN_DATA.get(
-        "access_token"
+    sucesso, resultado = (
+        obter_access_token()
     )
+
+    if not sucesso:
+
+        return jsonify({
+
+            "OK":
+                False,
+
+            "erro":
+                "Mercado Livre não conectado.",
+
+            "detalhes":
+                resultado
+
+        }), 401
+
+    access_token = resultado
 
     if not access_token:
 
@@ -1076,6 +1386,8 @@ def api_me():
 
     if resposta.status_code != 200:
 
+        # Se o token tiver sido recusado,
+        # não expomos o token na resposta.
         return jsonify({
 
             "OK":
@@ -1083,6 +1395,9 @@ def api_me():
 
             "status":
                 resposta.status_code,
+
+            "erro":
+                "Mercado Livre recusou a consulta.",
 
             "resposta":
                 dados
@@ -1129,7 +1444,7 @@ def oauth_refresh():
             True,
 
         "mensagem":
-            "Token atualizado.",
+            "Token atualizado com sucesso.",
 
         "user_id":
             resultado.get(
@@ -1156,26 +1471,16 @@ def oauth_refresh():
 @app.get("/oauth/logout")
 def oauth_logout():
 
-    limpar_token()
-
-    session.pop(
-        "oauth_state",
-        None
-    )
-
-    session.pop(
-        "code_verifier",
-        None
-    )
+    apagar_token()
 
     return pagina("""
     <div class="card">
 
         <h2>Mercado Livre desconectado</h2>
 
-        <p>
-            O token armazenado em memória
-            foi removido.
+        <p class="ok">
+            Os tokens armazenados pelo Gateway
+            foram removidos.
         </p>
 
         <a
@@ -1186,7 +1491,94 @@ def oauth_logout():
         </a>
 
     </div>
-    """), 200
+    """)
+
+
+# ============================================================
+# INFORMAÇÕES DO SISTEMA
+# ============================================================
+
+@app.get("/api/system")
+def api_system():
+
+    token = obter_token()
+
+    return jsonify({
+
+        "aplicacao":
+            "Opportunity Hunter V5",
+
+        "gateway":
+            "online",
+
+        "oauth_configurado":
+            configuracao_ok(),
+
+        "mercado_livre":
+            "conectado"
+            if token
+            else "não conectado",
+
+        "pkce":
+            MERCADOLIVRE_USE_PKCE,
+
+        "armazenamento":
+            "SQLite",
+
+        "proxima_fase":
+            "Análise de oportunidades"
+
+    })
+
+
+# ============================================================
+# ERROS
+# ============================================================
+
+@app.errorhandler(404)
+def pagina_404(erro):
+
+    return pagina("""
+    <div class="card">
+
+        <h2>Página não encontrada</h2>
+
+        <p class="error">
+            O endereço solicitado não existe.
+        </p>
+
+        <a
+            class="button"
+            href="/"
+        >
+            Voltar ao Opportunity Hunter
+        </a>
+
+    </div>
+    """), 404
+
+
+@app.errorhandler(500)
+def pagina_500(erro):
+
+    return pagina("""
+    <div class="card">
+
+        <h2>Erro interno</h2>
+
+        <p class="error">
+            O Gateway encontrou um erro interno.
+        </p>
+
+        <a
+            class="button"
+            href="/"
+        >
+            Voltar
+        </a>
+
+    </div>
+    """), 500
 
 
 # ============================================================
@@ -1195,7 +1587,7 @@ def oauth_logout():
 
 if __name__ == "__main__":
 
-    porta = int(
+    port = int(
         os.environ.get(
             "PORT",
             "10000"
@@ -1204,5 +1596,5 @@ if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=porta
+        port=port
     )
