@@ -385,6 +385,7 @@ def oauth_status():
 
 @app.get("/api/me")
 def api_me():
+    """Teste de conexão sem expor a resposta completa do perfil do usuário."""
     sucesso, resultado = obter_access_token()
     if not sucesso:
         return jsonify({"OK": False, "erro": "Mercado Livre não conectado.", "detalhes": resultado}), 401
@@ -398,18 +399,22 @@ def api_me():
         dados = {"resposta": resposta.text}
     if resposta.status_code != 200:
         return jsonify({"OK": False, "status": resposta.status_code, "erro": "Mercado Livre recusou a consulta.", "resposta": dados}), resposta.status_code
+    # /api/me é uma rota de diagnóstico acessível pelo navegador. A API do
+    # Mercado Livre devolve dados pessoais (e-mail, telefone e endereço), que
+    # não devem ser retransmitidos por esta aplicação. Mantemos somente campos
+    # mínimos para confirmar que a conta autenticada é a esperada.
     campos_publicos = ("id", "nickname", "site_id", "user_type")
-conta_resumida = {
-    campo: dados[campo]
-    for campo in campos_publicos
-    if campo in dados
-} if isinstance(dados, dict) else {}
+    conta_resumida = {
+        campo: dados[campo]
+        for campo in campos_publicos
+        if campo in dados
+    } if isinstance(dados, dict) else {}
 
-return jsonify({
-    "OK": True,
-    "mensagem": "Conexão com Mercado Livre confirmada.",
-    "mercado_livre": conta_resumida,
-})
+    return jsonify({
+        "OK": True,
+        "mensagem": "Conexão com Mercado Livre confirmada.",
+        "mercado_livre": conta_resumida,
+    })
 
 
 @app.get("/oauth/refresh")
@@ -445,3 +450,5 @@ inicializar_banco()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
+
+
