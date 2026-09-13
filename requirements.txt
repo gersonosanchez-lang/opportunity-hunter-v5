@@ -1,3 +1,4 @@
 Flask>=3.1,<4
 Gunicorn>=23,<24
-Requests
+Requests>=2.31,<3
+psycopg[binary]>=3.2,<4
