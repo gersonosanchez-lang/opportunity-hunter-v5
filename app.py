@@ -398,7 +398,18 @@ def api_me():
         dados = {"resposta": resposta.text}
     if resposta.status_code != 200:
         return jsonify({"OK": False, "status": resposta.status_code, "erro": "Mercado Livre recusou a consulta.", "resposta": dados}), resposta.status_code
-    return jsonify({"OK": True, "mercado_livre": dados})
+    campos_publicos = ("id", "nickname", "site_id", "user_type")
+conta_resumida = {
+    campo: dados[campo]
+    for campo in campos_publicos
+    if campo in dados
+} if isinstance(dados, dict) else {}
+
+return jsonify({
+    "OK": True,
+    "mensagem": "Conexão com Mercado Livre confirmada.",
+    "mercado_livre": conta_resumida,
+})
 
 
 @app.get("/oauth/refresh")
