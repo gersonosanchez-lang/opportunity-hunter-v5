@@ -316,7 +316,15 @@ def oauth_mercadolivre():
         return pagina("<div class='card'><h2>Configuração incompleta</h2><p class='error'>As credenciais do Mercado Livre não foram configuradas no Render.</p></div>"), 500
     state = secrets.token_urlsafe(32)
     session["oauth_state"] = state
-    parametros = {"response_type": "code", "client_id": MERCADOLIVRE_APP_ID, "redirect_uri": MERCADOLIVRE_REDIRECT_URI, "state": state}
+    parametros = {
+        "response_type": "code",
+        "client_id": MERCADOLIVRE_APP_ID,
+        "redirect_uri": MERCADOLIVRE_REDIRECT_URI,
+        "state": state,
+        # O refresh token só é disponibilizado quando o acesso offline é
+        # solicitado. Sem ele não há como manter a conexão após expirar.
+        "scope": "offline_access",
+    }
     if MERCADOLIVRE_USE_PKCE:
         verifier = gerar_code_verifier()
         session["code_verifier"] = verifier
@@ -357,6 +365,10 @@ def oauth_callback():
     if resposta.status_code != 200:
         publico = {chave: dados_token[chave] for chave in ("error", "error_description", "message") if isinstance(dados_token, dict) and chave in dados_token}
         return pagina(f"<div class='card'><h2>Mercado Livre recusou a autorização</h2><p class='error'>Não foi possível concluir a conexão.</p><p>HTTP: {resposta.status_code}</p><pre>{html.escape(str(publico or {'erro': 'Autorização recusada'}))}</pre><a class='button' href='/'>Voltar</a></div>"), 400
+    if not isinstance(dados_token, dict) or not dados_token.get("access_token") or not dados_token.get("refresh_token"):
+        campos = sorted(dados_token.keys()) if isinstance(dados_token, dict) else [type(dados_token).__name__]
+        logger.error("Resposta OAuth sem tokens obrigatórios; campos recebidos: %s", campos)
+        return pagina("<div class='card'><h2>Resposta OAuth incompleta</h2><p class='error'>O Mercado Livre não retornou access_token e refresh_token. Inicie a conexão novamente.</p></div>"), 502
     try:
         salvar_token(dados_token)
     except Exception:
