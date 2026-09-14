@@ -34,6 +34,13 @@ MERCADOLIVRE_USE_PKCE = os.environ.get("MERCADOLIVRE_USE_PKCE", "false").lower()
 AUTH_URL = "https://auth.mercadolivre.com.br/authorization"
 TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ME_URL = "https://api.mercadolibre.com/users/me"
+SEARCH_URL = "https://api.mercadolibre.com/sites/MLB/search"
+
+# Primeiro recorte do Opportunity Hunter: itens leves, padronizados e de
+# compra recorrente. A consulta pode ser alterada pelo usuário na tela.
+CONSULTA_INICIAL_FERRAMENTAS = "broca aco rapido"
+LIMITE_SCANNER = 20
+FERRAMENTAS_CATEGORY_ID = "MLB263532"
 
 # No Render, DATABASE_URL é fornecida pelo PostgreSQL. Sem ela, o app usa
 # SQLite local para desenvolvimento e testes.
@@ -285,6 +292,147 @@ def obter_access_token():
     return False, {"erro": "Mercado Livre não está conectado."}
 
 
+def _numero_scanner(valor, nome, minimo, maximo):
+    """Converte entradas brasileiras (por exemplo, 12,50) com limites claros."""
+    texto = str(valor or "").strip()
+    # Com vírgula, ponto é separador de milhar; sem vírgula, preservamos o
+    # ponto para também aceitar chamadas de API no formato decimal usual.
+    if "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    if not texto:
+        raise ValueError(f"Informe {nome}.")
+    try:
+        numero = float(texto)
+    except ValueError as erro:
+        raise ValueError(f"{nome.capitalize()} precisa ser um número válido.") from erro
+    if not minimo <= numero <= maximo:
+        raise ValueError(f"{nome.capitalize()} deve ficar entre {minimo:g} e {maximo:g}.")
+    return numero
+
+
+def parametros_scanner(argumentos):
+    consulta = str(argumentos.get("q", "")).strip()
+    if not 2 <= len(consulta) <= 80:
+        raise ValueError("Informe um produto entre 2 e 80 caracteres.")
+    return {
+        "consulta": consulta,
+        "custo": _numero_scanner(argumentos.get("custo"), "o custo de compra", 0.01, 5000),
+        "taxa_percentual": _numero_scanner(argumentos.get("taxa", "16"), "a taxa estimada", 0, 100),
+        "frete": _numero_scanner(argumentos.get("frete", "0"), "a reserva de frete", 0, 5000),
+    }
+
+
+def moeda_brl(valor):
+    texto = f"{float(valor):,.2f}"
+    return "R$ " + texto.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def analisar_item_ferramenta(item, parametros):
+    """Produz uma estimativa explicável; não é uma previsão de venda ou lucro."""
+    try:
+        preco = float(item.get("price"))
+    except (TypeError, ValueError):
+        return None
+    if preco <= 0:
+        return None
+
+    envio = item.get("shipping") if isinstance(item.get("shipping"), dict) else {}
+    frete_gratis = bool(envio.get("free_shipping"))
+    reserva_frete = parametros["frete"] if frete_gratis else 0.0
+    taxa = preco * parametros["taxa_percentual"] / 100
+    lucro = preco - parametros["custo"] - taxa - reserva_frete
+    margem = lucro / preco * 100
+    condicao = str(item.get("condition", "")).lower()
+    if condicao != "new":
+        return None
+    pontos = 0
+    motivos = []
+
+    if margem >= 30:
+        pontos += 55
+        motivos.append(f"margem estimada de {margem:.1f}%")
+    elif margem >= 25:
+        pontos += 45
+        motivos.append(f"margem estimada de {margem:.1f}%")
+    elif margem >= 15:
+        pontos += 25
+        motivos.append(f"margem estimada de {margem:.1f}%")
+    elif margem > 0:
+        pontos += 8
+        motivos.append(f"margem baixa: {margem:.1f}%")
+    else:
+        motivos.append(f"margem negativa: {margem:.1f}%")
+
+    if 60 <= preco <= 250:
+        pontos += 15
+        motivos.append("ticket na faixa inicial")
+    if condicao == "new":
+        pontos += 15
+        motivos.append("anúncio novo")
+    if item.get("original_price"):
+        pontos += 5
+        motivos.append("preço promocional identificado")
+
+    pontos = min(pontos, 100)
+    if pontos >= 70:
+        sinal = "Oportunidade para avaliar"
+    elif pontos >= 40:
+        sinal = "Avaliar com cuidado"
+    else:
+        sinal = "Descartar por enquanto"
+
+    return {
+        "id": str(item.get("id", "")),
+        "titulo": str(item.get("title", "Item sem título")),
+        "url": str(item.get("permalink", "")),
+        "preco": round(preco, 2),
+        "frete_gratis": frete_gratis,
+        "taxa_estimada": round(taxa, 2),
+        "reserva_frete": round(reserva_frete, 2),
+        "lucro_estimado": round(lucro, 2),
+        "margem_percentual": round(margem, 1),
+        "pontuacao": pontos,
+        "sinal": sinal,
+        "motivos": motivos,
+    }
+
+
+def buscar_oportunidades_ferramentas(parametros):
+    """Consulta dados públicos de anúncios; não compra, publica ou altera itens."""
+    headers = {"accept": "application/json"}
+    sucesso, access_token = obter_access_token()
+    if sucesso:
+        headers["Authorization"] = "Bearer " + access_token
+    try:
+        resposta = requests.get(
+            SEARCH_URL,
+            params={
+                "q": parametros["consulta"],
+                "category": FERRAMENTAS_CATEGORY_ID,
+                "limit": LIMITE_SCANNER,
+            },
+            headers=headers,
+            timeout=20,
+        )
+        resposta.raise_for_status()
+        corpo = resposta.json()
+    except requests.RequestException as erro:
+        logger.warning("Falha ao consultar busca pública do Mercado Livre: %s", erro)
+        raise RuntimeError("Não foi possível consultar os anúncios agora. Tente novamente em instantes.") from erro
+    except ValueError as erro:
+        raise RuntimeError("O Mercado Livre retornou uma resposta inválida para a busca.") from erro
+
+    resultados = corpo.get("results", []) if isinstance(corpo, dict) else []
+    oportunidades = [
+        analise
+        for item in resultados
+        if isinstance(item, dict)
+        for analise in [analisar_item_ferramenta(item, parametros)]
+        if analise is not None
+    ]
+    return sorted(oportunidades, key=lambda item: (item["pontuacao"], item["margem_percentual"]), reverse=True)
+
+
 HTML_BASE = """<!doctype html><html lang='pt-BR'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Opportunity Hunter</title><style>body{margin:0;padding:20px;background:#111;color:#eee;font-family:Arial,sans-serif}.container{max-width:760px;margin:auto}.card{background:#1c1c1c;border-radius:14px;padding:24px;margin-bottom:20px}.button{display:inline-block;padding:14px 20px;border-radius:8px;background:#3483fa;color:white;text-decoration:none;margin-top:10px;font-weight:bold}.ok{color:#35d07f}.warn{color:#ffcc00}.error{color:#ff5c5c}pre{white-space:pre-wrap;word-break:break-word}</style></head><body><div class='container'>{{conteudo|safe}}</div></body></html>"""
 
 
@@ -300,7 +448,7 @@ def inicio():
     conectado = bool(token and token.get("access_token"))
     status = "<span class='ok'>Conectado</span>" if conectado else "<span class='warn'>Não conectado</span>"
     user_id = f"<p><strong>User ID:</strong> {html.escape(str(token.get('user_id', '')))}</p>" if conectado else ""
-    return pagina(f"<div class='card'><h1>Opportunity Hunter</h1><h2>Gateway Mercado Livre</h2><p>Status: {status}</p>{user_id}<a class='button' href='/oauth/mercadolivre'>Conectar Mercado Livre</a><br><a class='button' href='/oauth/status'>Ver status</a><br><a class='button' href='/api/me'>Testar minha conta</a><br><a class='button' href='/health'>Ver saúde do Gateway</a></div>")
+    return pagina(f"<div class='card'><h1>Opportunity Hunter</h1><h2>Gateway Mercado Livre</h2><p>Status: {status}</p>{user_id}<a class='button' href='/scanner/ferramentas'>Scanner de Ferramentas</a><br><a class='button' href='/oauth/mercadolivre'>Conectar Mercado Livre</a><br><a class='button' href='/oauth/status'>Ver status</a><br><a class='button' href='/api/me'>Testar minha conta</a><br><a class='button' href='/health'>Ver saúde do Gateway</a></div>")
 
 
 @app.get("/health")
@@ -415,6 +563,105 @@ def api_me():
         "mensagem": "Conexão com Mercado Livre confirmada.",
         "mercado_livre": conta_resumida,
     })
+
+
+def token_csrf_scanner():
+    token = session.get("scanner_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["scanner_csrf_token"] = token
+    return token
+
+
+def pagina_scanner_ferramentas(argumentos, resultados=None, erro=None):
+    resultados = resultados or []
+    csrf_token = html.escape(token_csrf_scanner(), quote=True)
+    consulta = html.escape(str(argumentos.get("q", CONSULTA_INICIAL_FERRAMENTAS)), quote=True)
+    custo = html.escape(str(argumentos.get("custo", "35,00")), quote=True)
+    taxa = html.escape(str(argumentos.get("taxa", "16")), quote=True)
+    frete = html.escape(str(argumentos.get("frete", "0")), quote=True)
+
+    aviso_erro = f"<p class='error'>{html.escape(erro)}</p>" if erro else ""
+    linhas = []
+    for item in resultados:
+        url = item["url"] if item["url"].startswith("https://") else "#"
+        titulo = html.escape(item["titulo"])
+        motivos = html.escape(" • ".join(item["motivos"]))
+        classe = "ok" if item["pontuacao"] >= 70 else "warn" if item["pontuacao"] >= 40 else "error"
+        linhas.append(
+            "<tr>"
+            f"<td><a href='{html.escape(url, quote=True)}' target='_blank' rel='noopener'>{titulo}</a></td>"
+            f"<td>{moeda_brl(item['preco'])}</td>"
+            f"<td>{moeda_brl(item['lucro_estimado'])}</td>"
+            f"<td>{item['margem_percentual']:.1f}%</td>"
+            f"<td class='{classe}'>{html.escape(item['sinal'])}<br><small>{motivos}</small></td>"
+            "</tr>"
+        )
+    if resultados:
+        total_oportunidades = sum(item["pontuacao"] >= 70 for item in resultados)
+        tabela = (
+            f"<p class='ok'>{total_oportunidades} item(ns) marcado(s) para avaliação humana, de {len(resultados)} anúncio(s) analisado(s).</p>"
+            "<div style='overflow-x:auto'><table><thead><tr><th>Produto</th><th>Preço anunciado</th><th>Lucro estimado</th><th>Margem</th><th>Sinal</th></tr></thead>"
+            f"<tbody>{''.join(linhas)}</tbody></table></div>"
+        )
+    elif not erro and "q" in argumentos:
+        tabela = "<p class='warn'>Nenhum anúncio utilizável foi encontrado para essa busca.</p>"
+    else:
+        tabela = "<p class='warn'>Informe o custo de compra e inicie a primeira análise.</p>"
+
+    return f"""
+    <style>
+      .scanner-form {{ display:grid; gap:12px; max-width:620px; }}
+      .scanner-form label {{ display:grid; gap:5px; font-weight:bold; }}
+      .scanner-form input {{ box-sizing:border-box; padding:10px; border-radius:6px; border:1px solid #555; background:#101010; color:#eee; font-size:16px; }}
+      table {{ width:100%; border-collapse:collapse; margin-top:16px; }}
+      th, td {{ padding:10px; border-bottom:1px solid #444; text-align:left; vertical-align:top; }}
+      th {{ color:#ffcc00; }} a {{ color:#78adff; }} small {{ color:#bbb; font-weight:normal; }}
+    </style>
+    <div class='card'>
+      <h1>Scanner de Ferramentas</h1>
+      <p>Analisa anúncios públicos de ferramentas leves e estima margem a partir do seu custo. Não compra, publica nem altera anúncios.</p>
+      <form class='scanner-form' method='post' action='/scanner/ferramentas'>
+        <input type='hidden' name='csrf_token' value='{csrf_token}'>
+        <label>Produto ou termo de busca
+          <input name='q' value='{consulta}' minlength='2' maxlength='80' required>
+        </label>
+        <label>Seu custo de compra por unidade (R$)
+          <input name='custo' value='{custo}' inputmode='decimal' required>
+        </label>
+        <label>Taxa estimada do Mercado Livre (%)
+          <input name='taxa' value='{taxa}' inputmode='decimal' required>
+        </label>
+        <label>Reserva de frete por unidade quando houver frete grátis (R$)
+          <input name='frete' value='{frete}' inputmode='decimal' required>
+        </label>
+        <button class='button' type='submit'>Analisar oportunidades</button>
+      </form>
+      <p><small>Estimativa inicial: confirme custos, frete, impostos, fornecedor, qualidade e regras da categoria antes de comprar estoque.</small></p>
+      {aviso_erro}
+      {tabela}
+      <a class='button' href='/'>Voltar</a>
+    </div>
+    """
+
+
+@app.route("/scanner/ferramentas", methods=["GET", "POST"])
+def scanner_ferramentas():
+    if request.method == "GET":
+        return pagina(pagina_scanner_ferramentas({}))
+
+    argumentos = request.form.to_dict(flat=True)
+    token_recebido = argumentos.pop("csrf_token", "")
+    if not token_recebido or not secrets.compare_digest(token_recebido, session.get("scanner_csrf_token", "")):
+        return pagina(pagina_scanner_ferramentas(argumentos, erro="A sessão do formulário expirou. Atualize a página e tente novamente.")), 400
+    if "q" not in argumentos:
+        return pagina(pagina_scanner_ferramentas(argumentos))
+    try:
+        parametros = parametros_scanner(argumentos)
+        resultados = buscar_oportunidades_ferramentas(parametros)
+    except (ValueError, RuntimeError) as erro:
+        return pagina(pagina_scanner_ferramentas(argumentos, erro=str(erro))), 400
+    return pagina(pagina_scanner_ferramentas(argumentos, resultados=resultados))
 
 
 @app.get("/oauth/refresh")
